@@ -503,7 +503,7 @@ function render(){
     if (a === 'confirm') { if (draft != null) send({ t: 'pick', n: draft }); return; }
     if (a === 'unpick') { draft = view.mySecret; send({ t: 'unpick' }); return; }
     if (a === 'peek') { peek = !peek; render(); return; }
-    if (a === 'call') { if (confirm(`Pedir o número ${n}?`)) send({ t: 'call', n }); return; }
+    if (a === 'call') { send({ t: 'call', n }); return; }
     if (a === 'skip') { if (confirm('Passar a vez de ' + b.dataset.name + '?')) send({ t: 'skip' }); return; }
     if (a === 'pick') { restartPick = b.dataset.pid; render(); return; }
     if (a === 'restart') { send({ t: 'restart', pid: restartPick, lobby: b.dataset.lobby === '1' }); restartPick = null; return; }
