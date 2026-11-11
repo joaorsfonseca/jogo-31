@@ -80,12 +80,16 @@
   td,th{padding:7px 4px;border-bottom:1px solid var(--line);text-align:left}
   th{color:var(--muted);font-weight:500;font-size:13px}
   td.n,th.n{text-align:center;width:72px}
+  tr.me td{color:var(--gold);font-weight:700}
   tr.lose td{color:#ffb3aa;font-weight:700}
   #toast{position:fixed;left:50%;bottom:calc(24px + env(safe-area-inset-bottom));transform:translateX(-50%);
     background:#000c;color:#fff;padding:10px 16px;border-radius:10px;font-size:15px;max-width:90vw;
     opacity:0;transition:opacity .2s;pointer-events:none;z-index:9}
   #toast.on{opacity:1}
   details summary{cursor:pointer;color:var(--muted);font-size:14px}
+  .chips{display:flex;flex-wrap:wrap;gap:6px;margin:6px 0 0}
+  .chip{background:var(--card2);border:1px solid var(--line);border-radius:99px;padding:4px 10px;font-size:14px}
+  .chip b{color:var(--gold)}
   ol.rules{padding-left:20px;margin:8px 0 0;color:var(--muted);font-size:14px}
 </style>
 </head>
@@ -127,7 +131,7 @@ const qs = new URLSearchParams(location.search);
 // Ligamo-nos a vários servidores ao mesmo tempo: basta um funcionar em todos os telemóveis.
 const BROKERS = qs.get('broker') ? qs.get('broker').split(',') : [
   'wss://broker.emqx.io:8084/mqtt', 'wss://broker.hivemq.com:8884/mqtt', 'wss://test.mosquitto.org:8081/mqtt' ];
-const VERSION = 'v1 · 2026-11-11';
+const VERSION = 'v2 · 2026-11-11';
 const TOPIC = 'jogo-31-v1';
 const MAX_N = 31;
 const T = c => ({ host: `${TOPIC}/${c}/h`, info: `${TOPIC}/${c}/info`, client: pid => `${TOPIC}/${c}/c/${pid}` });
@@ -211,7 +215,7 @@ function startHost(resume){
   if (resume) { G = resume; G.players.forEach(p => p.connected = p.pid === myPid); }
   else {
     G = { code: newCode(), phase: 'lobby', gameNo: 0, secrets: {}, ready: {}, calls: [], turn: null, losers: [],
-          firstStarter: myPid, players: [{ pid: myPid, name: myName, connected: true, out: false }] };
+          firstStarter: myPid, players: [{ pid: myPid, uid: fbUid(), name: myName, connected: true, out: false }] };
   }
   code = G.code; conns.clear(); links.clear(); keepAwake(); openHostNet(); changed();
 }
@@ -230,7 +234,7 @@ function openHostNet(){
         if (role !== 'host') return;
         claimed = true; statusMsg = '';
         pub(t.info, { host: myPid, ts: Date.now() }, true);
-        changed();
+        changed(); ensureTable();
       }, 1500);
     });
   }, onHostMessage);
@@ -275,10 +279,12 @@ function onClientMsg(from, d){
     }
     const old = conns.get(p.pid); if (old && old.topic !== from) links.delete(old.topic);
     conns.set(p.pid, { topic: from, seen: Date.now() }); links.set(from, p.pid); p.connected = true;
+    if (d.uid) p.uid = String(d.uid).slice(0, 128);
     log('join', p.name); changed(); return;
   }
   const pid = links.get(from); if (!pid || !pl(pid)) return;
   touch(pid);
+  if (d.uid && pl(pid).uid !== d.uid) { pl(pid).uid = String(d.uid).slice(0, 128); changed(); }
   if (d.t === 'ping') return sendTo(from, { t: 'pong' });
   if (d.t === 'bye') { const p = pl(pid); p.connected = false; conns.delete(pid); links.delete(from); changed(); return; }
   act(pid, d);
@@ -339,12 +345,12 @@ function toLobby(){
 }
 function beginGame(){
   toLobby();
-  G.gameNo = (G.gameNo || 0) + 1; G.phase = 'pick';
+  G.gameNo = (G.gameNo || 0) + 1; G.phase = 'pick'; G.gameStartedAt = Date.now();
   if (!pl(G.firstStarter)) G.firstStarter = G.players[0].pid;
 }
 function maybeStartPlay(){
   if (G.phase !== 'pick' || !active().every(p => G.ready[p.pid])) return;
-  G.phase = 'play'; G.turn = G.firstStarter;
+  G.phase = 'play'; G.turn = G.firstStarter; G.gameStarter = uidOf(G.firstStarter);
   if (pl(G.turn)?.out || !pl(G.turn)) G.turn = nextActiveAfter(G.turn) || active()[0].pid;
   ensurePlayable();
 }
@@ -362,7 +368,21 @@ function ensurePlayable(){
   if (active().length <= 1 || allSame()) return endGame(active().map(q => q.pid));
   if (!G.turn || !pl(G.turn) || pl(G.turn).out) G.turn = nextActiveAfter(G.turn) || active()[0].pid;
 }
-function endGame(losers){ G.phase = 'over'; G.turn = null; G.losers = losers; }
+function endGame(losers){
+  G.phase = 'over'; G.turn = null; G.losers = losers;
+  if (G.players.length < 2) return;
+  const game = {
+    id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+    startedAt: G.gameStartedAt || Date.now(), endedAt: Date.now(),
+    starter: G.gameStarter || null,
+    losers: losers.map(uidOf),
+    results: G.players.map((p, i) => ({ uid: uidOf(p.pid), name: p.name, seat: i + 1, secret: G.secrets[p.pid] ?? null, lost: losers.includes(p.pid) })),
+    calls: G.calls.map(c => ({ p: uidOf(c.pid), n: c.n, freed: c.freed.map(uidOf) })),
+  };
+  game.playerUids = game.results.map(r => r.uid).filter(u => !u.startsWith('anon-'));
+  (G.pendingGames = G.pendingGames || []).push(game);
+  flushGames();
+}
 function kick(pid){
   const idx = G.players.findIndex(p => p.pid === pid); if (idx < 0) return;
   const nextTurn = G.phase === 'play' && G.turn === pid ? nextActiveAfter(pid) : G.turn;
@@ -388,13 +408,99 @@ function viewFor(pid){
       secret: (p.out || over || p.pid === pid) ? (G.secrets[p.pid] ?? null) : null })),
     mySecret: G.secrets[pid] ?? null, myReady: !!G.ready[pid],
     calls: G.calls, turn: G.turn, losers: G.losers || [],
-    firstStarter: pl(G.firstStarter) ? G.firstStarter : G.players[0]?.pid
+    firstStarter: pl(G.firstStarter) ? G.firstStarter : G.players[0]?.pid, tableId: G.tableId || null
   };
 }
 function changed(){
   if (role !== 'host') return;
   if (claimed) for (const [pid, c] of conns) sendTo(c.topic, { t: 'state', seq: ++stateSeq, hs: hostSession, v: viewFor(pid) });
-  view = viewFor(myPid); LS.set('host', G); render();
+  view = viewFor(myPid); LS.set('host', G); syncTablePlayers(); render();
+}
+
+/* ======================= Persistência (Firebase) ======================= */
+// Tudo aqui é opcional: se o Firebase não carregar, o jogo funciona na mesma (só não grava).
+const fb = () => (window.FB && window.FB.ok ? window.FB : null);
+const fbUid = () => fb()?.uid || null;
+const uidOf = pid => pl(pid)?.uid || ('anon-' + String(pid).slice(0, 8));
+function onFbReady(){                       // chamado pelo módulo Firebase após o login anónimo
+  log('firebase pronto', fbUid());
+  if (myName) fb().saveDevice(myName).catch(e => log('device', e));
+  if (role === 'host' && G) { const me = pl(myPid); if (me) me.uid = fbUid(); ensureTable(); changed(); }
+  if (role === 'client') sayHello();
+  if (!role) render();
+}
+let tablePromise = null;
+function ensureTable(){
+  if (role !== 'host' || !G || !claimed || !fb()) return;
+  if (G.tableId) { syncTablePlayers(); flushGames(); return; }
+  if (tablePromise) return;
+  tablePromise = fb().createTable(G.code)
+    .then(id => { G.tableId = id; log('mesa criada', id); changed(); flushGames(); })
+    .catch(e => log('createTable falhou', e))
+    .finally(() => { tablePromise = null; });
+}
+function syncTablePlayers(){                // regista na mesa quem entrou (uid, nome, lugar)
+  if (!G || !G.tableId || !fb()) return;
+  const list = G.players.filter(p => p.uid).map(p => ({ uid: p.uid, name: p.name, seat: G.players.indexOf(p) + 1 }));
+  if (!list.length) return;
+  const key = JSON.stringify(list); if (key === G.syncedKey) return;
+  G.syncedKey = key;
+  fb().syncPlayers(G.tableId, list).catch(e => { G.syncedKey = null; log('syncPlayers', e); });
+}
+let flushing = false;
+function flushGames(){                      // grava jogos pendentes (sobrevive a falhas de rede / recarregar)
+  if (flushing || role !== 'host' || !G || !fb() || !(G.pendingGames || []).length) return;
+  if (!G.tableId) return ensureTable();
+  flushing = true;
+  const game = G.pendingGames[0];
+  fb().saveGame(G.tableId, game)
+    .then(() => { G.pendingGames = G.pendingGames.filter(g => g.id !== game.id); log('jogo gravado', game.id); })
+    .catch(e => {
+      log('saveGame falhou', e);
+      if (e && e.code === 'permission-denied') G.pendingGames = G.pendingGames.filter(g => g.id !== game.id); // já gravado / inválido
+    })
+    .finally(() => { flushing = false; LS.set('host', G); if ((G.pendingGames || []).length) setTimeout(flushGames, 5000); });
+}
+const pct = (a, b) => b ? Math.round(100 * a / b) + '%' : '–';
+const favOf = nums => { const e = Object.entries(nums || {}).sort((a, b) => b[1] - a[1] || a[0] - b[0]); return e.length ? Number(e[0][0]) : null; };
+const topNums = (nums, k) => Object.entries(nums || {}).sort((a, b) => b[1] - a[1] || a[0] - b[0]).slice(0, k);
+
+/* ---- Placard da mesa ---- */
+let board = { open: false, data: null, unsub: null };
+function openBoard(){
+  if (!fb() || !view?.tableId) return toast('Placard ainda não disponível.');
+  board.open = true; board.data = null; render();
+  board.unsub = fb().watchTable(view.tableId, d => { board.data = d || {}; if (board.open) render(); });
+}
+function closeBoard(){ board.open = false; try { board.unsub && board.unsub(); } catch {} board.unsub = null; render(); }
+function boardRows(d){
+  return Object.entries(d.stats || {}).map(([uid, s]) => ({
+    uid, name: d.players?.[uid]?.name || s.name || '?', games: s.games || 0, paid: s.paid || 0,
+    calls: s.calls || 0, hits: s.hits || 0, fav: favOf(s.nums)
+  })).sort((a, b) => b.paid - a.paid || (b.paid / (b.games || 1)) - (a.paid / (a.games || 1)) || a.name.localeCompare(b.name));
+}
+function boardScreen(){
+  const d = board.data;
+  let body = '<p class="center muted">A carregar…</p>';
+  if (d) {
+    const rows = boardRows(d), me = fbUid(), top = topNums(d.secrets, 5);
+    body = rows.length ? `<table><tr><th>Jogador</th><th class="n">Jogos</th><th class="n">Pagou</th><th class="n">Pontaria</th><th class="n">Fav.</th></tr>
+      ${rows.map((r, i) => `<tr class="${r.uid === me ? 'me' : ''}"><td>${i === 0 && r.paid ? '💸 ' : ''}${esc(r.name)}</td><td class="n">${r.games}</td>
+        <td class="n">${r.paid}</td><td class="n">${pct(r.hits, r.calls)}</td><td class="n">${r.fav ?? '–'}</td></tr>`).join('')}</table>
+      <p class="muted" style="font-size:13px;margin:10px 0 0">Pontaria = pedidos que libertaram alguém. Fav. = número que mais escolhe.</p>
+      ${top.length ? `<h2 style="margin-top:14px">Números mais escolhidos</h2><div class="chips">${top.map(([n, c]) => `<span class="chip"><b>${esc(n)}</b> × ${c}</span>`).join('')}</div>` : ''}`
+      : '<p class="center muted">Ainda não há jogos terminados nesta mesa.</p>';
+  }
+  return `<div class="card"><h2>Placard da mesa ${esc(view?.code || '')}${d ? ` · ${d.gamesCount || 0} jogo${d.gamesCount === 1 ? '' : 's'}` : ''}</h2>${body}</div>
+    <button class="sec" id="closeBoard">Voltar ao jogo</button>`;
+}
+
+/* ---- Histórico do telemóvel (ecrã inicial) ---- */
+let profile = null, profileLoading = false;
+function loadProfile(){
+  if (!fb() || profile || profileLoading) return;
+  profileLoading = true;
+  fb().myProfile().then(p => { profile = p; if (!role) render(); }).catch(e => log('profile', e)).finally(() => { profileLoading = false; });
 }
 
 /* ======================= Cliente ======================= */
@@ -410,7 +516,7 @@ function joinGame(c){
   clearInterval(pingTimer);
   pingTimer = setInterval(clientTick, 4000);
 }
-function sayHello(){ helloAt = Date.now(); pub(T(code).host, { t: 'hello', from: myPid, name: myName }); }
+function sayHello(){ helloAt = Date.now(); pub(T(code).host, { t: 'hello', from: myPid, name: myName, uid: fbUid() }); }
 function clientTick(){
   if (role !== 'client') return clearInterval(pingTimer);
   if (!netUp()) { if (!view) { statusMsg = 'A ligar aos servidores (0/' + BROKERS.length + ')…'; render(); } return; }
@@ -422,7 +528,7 @@ function clientTick(){
     }
     return;
   }
-  pub(T(code).host, { t: 'ping', from: myPid });
+  pub(T(code).host, { t: 'ping', from: myPid, uid: fbUid() });
   if (now - lastHost > 15000) {
     statusMsg = 'Sem resposta do anfitrião… (o ecrã dele pode estar bloqueado)'; render(); sayHello();
   }
@@ -449,6 +555,8 @@ function leave(silent){
   else if (role === 'client') pub(T(code).host, { t: 'bye', from: myPid });
   const r = role; role = null; view = null; G = null; statusMsg = ''; conns.clear(); links.clear();
   draft = null; peek = false; seenCalls = { game: null, n: 0 };
+  if (board.open) { try { board.unsub && board.unsub(); } catch {} board = { open: false, data: null, unsub: null }; }
+  profile = null;
   clearInterval(pingTimer); clearInterval(hbTimer); clearTimeout(claimTimer);
   netEnd();
   if (r) render();
@@ -479,6 +587,7 @@ function announce(v){
 function render(){
   if (!role) return renderHome();
   if (!view) { app.innerHTML = topBar() + `<div class="card center">${esc(statusMsg || 'A ligar…')}</div>`; bindTop(); return; }
+  if (board.open) { app.innerHTML = topBar() + boardScreen(); bindTop(); document.getElementById('closeBoard').onclick = closeBoard; return; }
   const v = view, me = v.players.find(p => p.pid === v.me), isHost = v.me === v.hostPid;
   announce(v);
   if (v.phase !== 'pick') draft = null;
@@ -507,16 +616,20 @@ function render(){
 }
 function topBar(){
   return `<div class="top"><div class="code">Sala <b>${esc(code || '')}</b>${role==='host' ? ' · anfitrião' : ''}<br><span style="font-size:12px">servidores ligados: ${netUp()}/${BROKERS.length} · ${VERSION}</span></div>
-    <div class="row" style="flex:0 0 auto;gap:6px"><button class="small danger" id="leave">${role === 'host' ? 'Fechar sala' : 'Sair'}</button></div></div>`;
+    <div class="row" style="flex:0 0 auto;gap:6px">${view?.tableId && fb() && !board.open ? '<button class="small sec" id="board">🏆 Placard</button>' : ''}<button class="small danger" id="leave">${role === 'host' ? 'Fechar sala' : 'Sair'}</button></div></div>`;
 }
-function bindTop(){ const b = document.getElementById('leave'); if (b) b.onclick = () => leave(false); }
+function bindTop(){
+  const b = document.getElementById('leave'); if (b) b.onclick = () => leave(false);
+  const p = document.getElementById('board'); if (p) p.onclick = openBoard;
+}
 
 function renderHome(){
   const saved = LS.get('host');
   app.innerHTML = `
     <h1>🎯 Jogo do 31</h1><p class="sub">Escolhe um número secreto e espera que alguém o diga</p>
     <div class="card"><label for="nm">O teu nickname</label>
-      <input id="nm" maxlength="16" autocomplete="off" placeholder="ex.: Zé" value="${esc(myName)}"></div>
+      <input id="nm" maxlength="16" autocomplete="off" placeholder="ex.: Zé" value="${esc(myName)}">
+      ${profile && profile.games ? `<p class="muted" style="margin:10px 0 0;font-size:14px">O teu histórico: <b>${profile.tables}</b> mesa${profile.tables === 1 ? '' : 's'} · <b>${profile.games}</b> jogo${profile.games === 1 ? '' : 's'} · pagaste <b>${profile.paid}</b> · pontaria <b>${pct(profile.hits, profile.calls)}</b>${profile.fav != null ? ` · número favorito <b>${profile.fav}</b>` : ''}</p>` : ''}</div>
     <div class="card"><h2>Criar jogo</h2><button id="host">Criar mesa</button>
       ${saved && saved.phase ? `<div class="gap"></div><button class="sec" id="resume">Retomar mesa ${esc(saved.code)}</button>` : ''}</div>
     <div class="card"><h2>Entrar num jogo</h2><label for="cd">Código da mesa</label>
@@ -528,15 +641,17 @@ function renderHome(){
       <li>Se alguém pedir o teu número, ficas livre e sais da roda.</li>
       <li>O jogo continua enquanto houver jogadores com números por sair. Não há posições: só conta quem fica no fim, e esse paga!</li>
       <li>Se os que restam tiverem todos o mesmo número, o jogo acaba logo e pagam todos.</li></ol></details></div>
-    <p class="muted center" style="font-size:12px">Guardamos só o nickname neste telemóvel. ${VERSION}</p>`;
+    <p class="muted center" style="font-size:12px">Guardamos o nickname, o tipo de telemóvel e as estatísticas de jogo, sem login.<br>${VERSION}</p>`;
+  loadProfile();
   const nm = document.getElementById('nm'), cd = document.getElementById('cd');
   nm.oninput = () => { myName = nm.value; LS.set('name', myName.trim()); };
   cd.oninput = () => { joinCode = cd.value = cd.value.toUpperCase().replace(/[^A-Z]/g, ''); };
   const needName = () => { myName = nm.value.trim(); if (!myName) { toast('Escreve um nickname primeiro.'); nm.focus(); return false; } LS.set('name', myName); return true; };
-  document.getElementById('host').onclick = () => { if (needName()) { LS.del('host'); startHost(null); } };
-  const r = document.getElementById('resume'); if (r) r.onclick = () => { if (needName()) startHost(saved); };
+  const needNameFb = () => { const ok = needName(); if (ok && fb()) fb().saveDevice(myName).catch(e => log('device', e)); return ok; };
+  document.getElementById('host').onclick = () => { if (needNameFb()) { LS.del('host'); startHost(null); } };
+  const r = document.getElementById('resume'); if (r) r.onclick = () => { if (needNameFb()) startHost(saved); };
   document.getElementById('join').onclick = () => {
-    if (!needName()) return; if (joinCode.length !== 4) return toast('O código tem 4 letras.'); joinGame(joinCode); };
+    if (!needNameFb()) return; if (joinCode.length !== 4) return toast('O código tem 4 letras.'); joinGame(joinCode); };
 }
 
 function lobby(v, isHost){
@@ -644,6 +759,105 @@ function playersCard(v, isHost){
 }
 
 render();
+</script>
+<script type="module">
+/* ======================= Firebase (Auth anónima + Firestore) ======================= */
+// Os valores abaixo identificam o projeto e são públicos por natureza; a proteção está nas regras do Firestore.
+const firebaseConfig = {
+  apiKey: "AIzaSyAAwt4UBkNrCW9bQmcQrBMlk1fhp54ib0g",
+  authDomain: "jogo-31.firebaseapp.com",
+  projectId: "jogo-31",
+  storageBucket: "jogo-31.firebasestorage.app",
+  messagingSenderId: "883989877039",
+  appId: "1:883989877039:web:cf21bb9b05466bc89bd1da"
+};
+const FB_SDK = 'https://www.gstatic.com/firebasejs/10.12.2/';
+const params = new URLSearchParams(location.search);
+
+function deviceInfo(){
+  const ua = navigator.userAgent || '';
+  const platform = /iPhone|iPad|iPod/.test(ua) || (/Macintosh/.test(ua) && navigator.maxTouchPoints > 1) ? 'iOS'
+    : /Android/.test(ua) ? 'Android' : 'Desktop';
+  const browser = /SamsungBrowser/.test(ua) ? 'Samsung' : /EdgA?\//.test(ua) ? 'Edge' : /FxiOS|Firefox/.test(ua) ? 'Firefox'
+    : /CriOS|Chrome/.test(ua) ? 'Chrome' : /Safari/.test(ua) ? 'Safari' : 'Outro';
+  return { platform, browser, lang: (navigator.language || '').slice(0, 10) };
+}
+
+if (params.get('nofb') !== '1') {
+  try {
+    const [{ initializeApp }, A, F] = await Promise.all([
+      import(FB_SDK + 'firebase-app.js'), import(FB_SDK + 'firebase-auth.js'), import(FB_SDK + 'firebase-firestore.js')]);
+    const emu = params.get('fbemu');                       // testes locais com o emulador
+    const app = initializeApp(emu ? { ...firebaseConfig, projectId: 'demo-jogo-31' } : firebaseConfig);
+    const auth = A.getAuth(app), db = F.getFirestore(app);
+    if (emu) { A.connectAuthEmulator(auth, `http://${emu}:9099`, { disableWarnings: true }); F.connectFirestoreEmulator(db, emu, 8085); }
+    const { doc, getDoc, setDoc, updateDoc, collection, addDoc, writeBatch, onSnapshot, query, where, getDocs, limit,
+            serverTimestamp, arrayUnion, increment } = F;
+
+    const FB = window.FB = {
+      ok: false, uid: null,
+      async saveDevice(name){
+        const ref = doc(db, 'devices', FB.uid);
+        const snap = await getDoc(ref);
+        const data = { name: String(name).slice(0, 16), names: arrayUnion(String(name).slice(0, 16)), ...deviceInfo(), lastSeen: serverTimestamp() };
+        if (!snap.exists()) data.firstSeen = serverTimestamp();
+        await setDoc(ref, data, { merge: true });
+      },
+      async createTable(code){
+        const ref = await addDoc(collection(db, 'tables'), {
+          code, hostUid: FB.uid, createdAt: serverTimestamp(), lastActivityAt: serverTimestamp(),
+          gamesCount: 0, playerUids: [], players: {}, stats: {}, secrets: {} });
+        return ref.id;
+      },
+      async syncPlayers(tableId, list){
+        const upd = { playerUids: arrayUnion(...list.map(x => x.uid)), lastActivityAt: serverTimestamp() };
+        list.forEach(x => { upd['players.' + x.uid] = { name: x.name, seat: x.seat }; });
+        await updateDoc(doc(db, 'tables', tableId), upd);
+      },
+      // grava o jogo (imutável) e actualiza, na mesma transacção, os agregados da mesa:
+      // stats.{uid} = { name, games, paid, calls, hits, nums.{n} }   secrets.{n} = vezes escolhido
+      async saveGame(tableId, g){
+        const b = writeBatch(db);
+        const { id, ...data } = g;
+        b.set(doc(db, 'tables', tableId, 'games', id), { ...data, createdAt: serverTimestamp() });
+        const upd = { gamesCount: increment(1), lastActivityAt: serverTimestamp() };
+        const count = {};                    // vários jogadores podem ter o mesmo número → somar antes de escrever
+        g.results.forEach(r => { if (r.secret != null) count[r.secret] = (count[r.secret] || 0) + 1; });
+        Object.entries(count).forEach(([n, c]) => { upd['secrets.' + n] = increment(c); });
+        g.results.filter(r => !r.uid.startsWith('anon-')).forEach(r => {
+          const k = 'stats.' + r.uid + '.', mine = g.calls.filter(c => c.p === r.uid);
+          upd[k + 'name'] = r.name;
+          upd[k + 'games'] = increment(1);
+          upd[k + 'paid'] = increment(r.lost ? 1 : 0);
+          upd[k + 'calls'] = increment(mine.length);
+          upd[k + 'hits'] = increment(mine.filter(c => c.freed.length).length);
+          if (r.secret != null) upd[k + 'nums.' + r.secret] = increment(1);
+        });
+        b.update(doc(db, 'tables', tableId), upd);
+        await b.commit();
+      },
+      watchTable(tableId, cb){
+        return onSnapshot(doc(db, 'tables', tableId), s => cb(s.data()), e => console.warn('[31] placard', e));
+      },
+      // histórico do telemóvel: soma as estatísticas de todas as mesas onde jogou
+      async myProfile(){
+        const qs = await getDocs(query(collection(db, 'tables'), where('playerUids', 'array-contains', FB.uid), limit(500)));
+        const p = { tables: qs.size, games: 0, paid: 0, calls: 0, hits: 0, nums: {}, fav: null };
+        qs.forEach(d => { const s = d.data().stats?.[FB.uid]; if (!s) return;
+          p.games += s.games || 0; p.paid += s.paid || 0; p.calls += s.calls || 0; p.hits += s.hits || 0;
+          Object.entries(s.nums || {}).forEach(([n, c]) => { p.nums[n] = (p.nums[n] || 0) + c; }); });
+        const e = Object.entries(p.nums).sort((a, b) => b[1] - a[1] || a[0] - b[0]); p.fav = e.length ? Number(e[0][0]) : null;
+        return p;
+      }
+    };
+    A.onAuthStateChanged(auth, u => {
+      if (u && !FB.ok) { FB.uid = u.uid; FB.ok = true; try { window.onFbReady && window.onFbReady(); } catch (e) { console.error(e); } }
+    });
+    await A.signInAnonymously(auth);
+  } catch (e) {
+    console.warn('[31] Firebase indisponível — o jogo continua sem gravar.', e);
+  }
+}
 </script>
 </body>
 </html>
