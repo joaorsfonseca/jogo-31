@@ -7,8 +7,8 @@ Web app multijogador (um anfitrião cria a mesa, os outros entram com um código
 1. Cada jogador escolhe em segredo um número de 1 a 31 (vários podem escolher o mesmo).
 2. À vez, na ordem da mesa, cada um pede um número que ainda não tenha saído — e nunca o seu.
 3. Se alguém pedir o teu número, ficas livre e sais da roda.
-4. O jogo continua enquanto houver jogadores com números por sair. O último que sobrar paga.
-   - Caso raro: se os restantes tiverem todos o mesmo número e já não houver outros por pedir, pagam todos.
+4. Não há posições: só conta quem fica no fim. O último que sobrar paga.
+5. Se os que restam tiverem todos o mesmo número, o jogo acaba logo e pagam todos (ninguém o pode pedir).
 
 ## Anfitrião
 

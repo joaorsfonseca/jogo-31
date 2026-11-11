@@ -202,7 +202,8 @@ function nextActiveAfter(pid){
   return null;
 }
 // um jogador pode pedir algum número? (há números por sair que não sejam o seu)
-const canCall = pid => { const c = called(); return NUMS.some(n => !c.has(n) && n !== G.secrets[pid]); };
+// todos os que restam têm o mesmo número → ninguém o pode pedir, perdem todos
+const allSame = () => { const a = active(); return a.length > 1 && a.every(q => G.secrets[q.pid] === G.secrets[a[0].pid]); };
 
 function startHost(resume){
   if (!netOk()) return;
@@ -210,7 +211,7 @@ function startHost(resume){
   if (resume) { G = resume; G.players.forEach(p => p.connected = p.pid === myPid); }
   else {
     G = { code: newCode(), phase: 'lobby', gameNo: 0, secrets: {}, ready: {}, calls: [], turn: null, losers: [],
-          firstStarter: myPid, players: [{ pid: myPid, name: myName, connected: true, out: false, place: null }] };
+          firstStarter: myPid, players: [{ pid: myPid, name: myName, connected: true, out: false }] };
   }
   code = G.code; conns.clear(); links.clear(); keepAwake(); openHostNet(); changed();
 }
@@ -270,7 +271,7 @@ function onClientMsg(from, d){
       else if (G.phase !== 'lobby') return sendTo(from, { t: 'err', fatal: true, m: 'O jogo já começou. Espera pelo próximo.' });
       else if (!name) return sendTo(from, { t: 'err', fatal: true, m: 'Nickname inválido.' });
       else if (G.players.length >= 30) return sendTo(from, { t: 'err', fatal: true, m: 'Sala cheia.' });
-      else { p = { pid: from, name, connected: true, out: false, place: null }; G.players.push(p); }
+      else { p = { pid: from, name, connected: true, out: false }; G.players.push(p); }
     }
     const old = conns.get(p.pid); if (old && old.topic !== from) links.delete(old.topic);
     conns.set(p.pid, { topic: from, seen: Date.now() }); links.set(from, p.pid); p.connected = true;
@@ -333,7 +334,7 @@ function act(pid, d){
   changed();
 }
 function toLobby(){
-  G.players.forEach(x => { x.out = false; x.place = null; });
+  G.players.forEach(x => { x.out = false; });
   Object.assign(G, { phase: 'lobby', secrets: {}, ready: {}, calls: [], turn: null, losers: [] });
 }
 function beginGame(){
@@ -349,23 +350,17 @@ function maybeStartPlay(){
 }
 function doCall(pid, n){
   const freed = active().filter(q => q.pid !== pid && G.secrets[q.pid] === n);
-  freed.forEach(q => { q.out = true; q.place = G.players.filter(x => x.out).length; });
+  freed.forEach(q => { q.out = true; });
   G.calls.push({ pid, n, freed: freed.map(q => q.pid) });
   if (active().length <= 1) return endGame(active().map(q => q.pid));
   G.turn = nextActiveAfter(pid) || pid;
   ensurePlayable();
 }
-// Caso raro: todos os restantes têm o mesmo número e todos os outros já saíram → ninguém pode jogar.
+// Fim do jogo: resta 1 jogador, ou os que restam têm todos o mesmo número (perdem todos, sem mais pedidos).
 function ensurePlayable(){
   if (G.phase !== 'play') return;
-  if (active().length <= 1) return endGame(active().map(q => q.pid));
-  const start = G.turn;
-  for (let k = 0; k < G.players.length; k++) {
-    if (G.turn && pl(G.turn) && !pl(G.turn).out && canCall(G.turn)) return;
-    G.turn = nextActiveAfter(G.turn);
-    if (!G.turn || G.turn === start) break;
-  }
-  endGame(active().map(q => q.pid));
+  if (active().length <= 1 || allSame()) return endGame(active().map(q => q.pid));
+  if (!G.turn || !pl(G.turn) || pl(G.turn).out) G.turn = nextActiveAfter(G.turn) || active()[0].pid;
 }
 function endGame(losers){ G.phase = 'over'; G.turn = null; G.losers = losers; }
 function kick(pid){
@@ -387,7 +382,7 @@ function viewFor(pid){
   const over = G.phase === 'over';
   return {
     code: G.code, me: pid, hostPid: myPid, phase: G.phase, gameNo: G.gameNo,
-    players: G.players.map(p => ({ pid: p.pid, name: p.name, connected: p.connected, out: p.out, place: p.place,
+    players: G.players.map(p => ({ pid: p.pid, name: p.name, connected: p.connected, out: p.out,
       ready: !!G.ready[p.pid],
       // o número de cada um só é revelado quando sai (fica livre) ou no fim do jogo
       secret: (p.out || over || p.pid === pid) ? (G.secrets[p.pid] ?? null) : null })),
@@ -531,7 +526,8 @@ function renderHome(){
       <li>Cada jogador escolhe em segredo um número de 1 a ${MAX_N} (vários podem escolher o mesmo).</li>
       <li>À vez, na ordem da mesa, cada um pede um número que ainda não tenha saído — e nunca o seu.</li>
       <li>Se alguém pedir o teu número, ficas livre e sais da roda.</li>
-      <li>O jogo continua enquanto houver jogadores com números por sair. O último que sobrar paga!</li></ol></details></div>
+      <li>O jogo continua enquanto houver jogadores com números por sair. Não há posições: só conta quem fica no fim, e esse paga!</li>
+      <li>Se os que restam tiverem todos o mesmo número, o jogo acaba logo e pagam todos.</li></ol></details></div>
     <p class="muted center" style="font-size:12px">Guardamos só o nickname neste telemóvel. ${VERSION}</p>`;
   const nm = document.getElementById('nm'), cd = document.getElementById('cd');
   nm.oninput = () => { myName = nm.value; LS.set('name', myName.trim()); };
@@ -604,14 +600,16 @@ function overPhase(v, isHost){
   const msg = !L.length ? 'Jogo terminado.'
     : iLose ? (L.length > 1 ? `<b>Pagam tu e ${names(L.filter(x => x !== v.me))}!</b>` : '<b>Pagas tu!</b>')
     : `<b>${names(L)}</b> paga${L.length > 1 ? 'm' : ''}!`;
-  const rows = v.players.slice().sort((a, b) => (a.out ? a.place : 99) - (b.out ? b.place : 99)).map(p => {
+  const rows = v.players.slice().sort((a, b) => L.includes(a.pid) - L.includes(b.pid)).map(p => {
     const lose = L.includes(p.pid);
     return `<tr class="${lose ? 'lose' : ''}"><td>${esc(p.name)}${p.pid === v.me ? ' (tu)' : ''}</td><td class="n">${p.secret ?? '–'}</td>
-      <td class="n">${lose ? '💸' : p.out ? '#' + p.place : '–'}</td></tr>`;
+      <td class="n">${lose ? '💸' : p.out ? '✓' : '–'}</td></tr>`;
   }).join('');
   return `<div class="card center"><h2>Fim do jogo ${v.gameNo}</h2><div style="font-size:48px">💸</div>
-    <p style="font-size:22px;margin:6px 0">${msg}</p><p class="muted" style="margin:0">${v.calls.length} números pedidos</p></div>
-    <div class="card"><h2>Números secretos</h2><table><tr><th>Jogador</th><th class="n">Número</th><th class="n">Saiu</th></tr>${rows}</table></div>
+    <p style="font-size:22px;margin:6px 0">${msg}</p>
+    ${L.length > 1 ? `<p style="margin:0 0 6px">Ficaram todos com o número <b>${v.players.find(p => p.pid === L[0])?.secret ?? '?'}</b> — ninguém o podia pedir.</p>` : ''}
+    <p class="muted" style="margin:0">${v.calls.length} números pedidos</p></div>
+    <div class="card"><h2>Números secretos</h2><table><tr><th>Jogador</th><th class="n">Número</th><th class="n">Livre</th></tr>${rows}</table></div>
     ${v.calls.length ? `<div class="card"><details><summary>Histórico de pedidos</summary><ul class="log" style="margin-top:8px">${v.calls.slice().reverse().map(callLine).join('')}</ul></details></div>` : ''}
     ${isHost ? restartCard(v) : '<p class="muted center">À espera que o anfitrião recomece o jogo…</p>'}`;
 }
@@ -629,7 +627,7 @@ function playersCard(v, isHost){
   const items = v.players.map((p, i) => {
     let tag = '';
     if (v.losers.includes(p.pid)) tag = '<span class="tag red">paga</span>';
-    else if (p.out) tag = `<span class="tag ok">livre #${p.place} · ${p.secret}</span>`;
+    else if (p.out) tag = `<span class="tag ok">livre · ${p.secret}</span>`;
     else if (v.phase === 'pick') tag = p.ready ? '<span class="tag ok">pronto</span>' : '<span class="tag">a escolher</span>';
     else if (v.phase === 'play' && p.pid === v.turn) tag = '<span class="tag gold">a pedir…</span>';
     else if (inGame) tag = '<span class="tag">em jogo</span>';
